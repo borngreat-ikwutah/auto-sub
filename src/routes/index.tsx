@@ -1,13 +1,18 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { Navbar } from "@/components/layout/Navbar";
+import { HeroSection } from "@/components/landing/HeroSection";
 
 export const Route = createFileRoute("/")({
-  component: Dashboard,
+  component: LandingPage,
 });
 
-function Dashboard() {
+function LandingPage() {
   return (
-    <div className="flex h-full items-center justify-center">
-      Welcome to AutoSub Agent
+    <div className="min-h-dvh bg-zinc-950 text-zinc-50 font-sans selection:bg-zinc-800">
+      <Navbar />
+      <main>
+        <HeroSection />
+      </main>
     </div>
   );
 }
