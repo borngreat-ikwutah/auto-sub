@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { ArrowRight, Terminal, CheckCircle2 } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 
 export function HeroSection() {
   return (
@@ -18,13 +19,15 @@ export function HeroSection() {
           </p>
 
           <div className="flex flex-wrap items-center gap-4 pt-2">
-            <Button
-              size="lg"
-              className="bg-zinc-100 text-zinc-950 hover:bg-white h-12 px-6"
-            >
-              Launch Agent
-              <ArrowRight className="ml-2 h-4 w-4" />
-            </Button>
+            <Link to="/dashboard">
+              <Button
+                size="lg"
+                className="bg-zinc-100 text-zinc-950 hover:bg-white h-12 px-6"
+              >
+                Launch Agent
+                <ArrowRight className="ml-2 h-4 w-4" />
+              </Button>
+            </Link>
           </div>
         </div>
 

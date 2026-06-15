@@ -1,83 +1,101 @@
 import { createServerFn } from '@tanstack/react-start'
 import { db } from '@/db'
 import { chatMessages } from '@/db/schema'
-import OpenAI from 'openai'
 
-// Initialize Venice AI via OpenAI compatible SDK
-const openai = new OpenAI({
-  apiKey: process.env.VENICE_API_KEY || 'missing_key',
-  baseURL: 'https://api.venice.ai/api/v1',
-})
+// ─── Pure local intent parser — no external AI needed ─────────────────────────
+// Handles patterns like:
+//   "Pay 5 USDC to Netflix every week"
+//   "Send 9.99 USDC to 0xAbc monthly"
+//   "Subscribe to Spotify for 15 USDC weekly"
 
+function parseIntent(message: string) {
+  const text = message.trim();
+
+  // ── Amount ───────────────────────────────────────────────────────────────────
+  // Match: "5 USDC", "9.99 USDC", "5", "$5"
+  const amountMatch = text.match(/\$?(\d+(?:\.\d+)?)\s*(?:USDC|usdc|usd)?/);
+  const amountNum   = amountMatch ? parseFloat(amountMatch[1]) : 5;
+  const amount      = `${amountNum.toFixed(2)} USDC`;
+
+  // ── Recipient ─────────────────────────────────────────────────────────────────
+  // Match after "to", "pay", "send to", "for" keywords
+  // Also handle Ethereum addresses (0x...)
+  let recipient = 'Unknown';
+  const ethAddrMatch = text.match(/0x[a-fA-F0-9]{40}/);
+  if (ethAddrMatch) {
+    recipient = ethAddrMatch[0];
+  } else {
+    // Grab 1–2 words after "to" or "pay" / "send" / "for"
+    const recipientMatch = text.match(
+      /(?:^|\s)(?:to|pay(?:ing)?|send(?:ing)?\s+to|subscribe\s+to|subscription\s+(?:for|to))\s+([A-Za-z0-9._-]+(?:\s+[A-Za-z0-9._-]+)?)/i
+    );
+    if (recipientMatch) {
+      // Filter out amount words so "5" doesn't become the recipient
+      const candidate = recipientMatch[1].trim();
+      if (!/^\d/.test(candidate)) recipient = candidate;
+    }
+    // Fallback: first capitalised word that isn't a keyword
+    if (recipient === 'Unknown') {
+      const keywords = new Set(['pay', 'send', 'usdc', 'usd', 'every', 'weekly', 'daily', 'monthly', 'subscribe', 'subscription', 'for', 'to', 'the', 'a', 'an']);
+      const words = text.split(/\s+/);
+      for (const w of words) {
+        const clean = w.replace(/[^A-Za-z0-9]/g, '');
+        if (clean.length > 1 && /^[A-Z]/.test(clean) && !keywords.has(clean.toLowerCase())) {
+          recipient = clean;
+          break;
+        }
+      }
+    }
+  }
+
+  // ── Frequency ─────────────────────────────────────────────────────────────────
+  let frequency = 'Weekly';
+  if (/\b(daily|every\s+day|per\s+day)\b/i.test(text))        frequency = 'Daily';
+  else if (/\b(bi-?weekly|every\s+two\s+weeks|biweekly)\b/i.test(text)) frequency = 'Bi-Weekly';
+  else if (/\b(weekly|every\s+week|per\s+week)\b/i.test(text)) frequency = 'Weekly';
+  else if (/\b(monthly|every\s+month|per\s+month)\b/i.test(text)) frequency = 'Monthly';
+
+  // ── Monthly Cap ───────────────────────────────────────────────────────────────
+  const multiplier =
+    frequency === 'Daily'     ? 30 :
+    frequency === 'Bi-Weekly' ? 2  :
+    frequency === 'Weekly'    ? 4  : 1;
+  const monthlyCap = `${(amountNum * multiplier).toFixed(2)} USDC`;
+
+  return { recipient, amount, frequency, monthlyCap };
+}
+
+// ─── Server function ───────────────────────────────────────────────────────────
 export const parseAgentIntent = createServerFn({ method: 'POST' })
   .validator((d: { message: string; ownerAddress: string }) => d)
   .handler(async ({ data }) => {
-    // 1. Insert user message into Neon DB
+    // 1. Persist user message in Neon DB
     await db.insert(chatMessages).values({
       ownerAddress: data.ownerAddress,
       role: 'user',
       content: data.message,
     })
 
-    // 2. Setup strict system prompt for Venice AI
-    const systemPrompt = `You are an AI assistant for a Web3 Auto-Subscription dApp called AutoSub. 
-The user will ask to create a recurring payment (e.g. "Pay 5 USDC to Netflix every week").
-You MUST extract the parameters and return ONLY a strict JSON object with no markdown formatting.
-JSON Schema:
-{
-  "recipient": "string (the extracted name or address)",
-  "amount": "string (e.g. '5.00 USDC')",
-  "frequency": "string (e.g. 'Weekly', 'Daily', 'Monthly')",
-  "monthlyCap": "string (e.g. '25.00 USDC', calculate based on frequency and amount)"
-}`;
+    // 2. Parse locally (no external API)
+    const structuredData = parseIntent(data.message);
 
-    let parsedData = {
-      recipient: "Unknown",
-      amount: "0.00 USDC", 
-      frequency: "Unknown",
-      monthlyCap: "0.00 USDC"
-    };
+    const responseText =
+      `I can create a recurring payment:\n` +
+      `Recipient: ${structuredData.recipient}\n` +
+      `Amount: ${structuredData.amount}\n` +
+      `Frequency: ${structuredData.frequency}\n\n` +
+      `Approve this delegation?`;
 
-    try {
-      if (process.env.VENICE_API_KEY) {
-        const response = await openai.chat.completions.create({
-          model: 'openai-gpt-55',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: data.message }
-          ],
-        });
-
-        const rawJson = response.choices[0]?.message?.content || "{}";
-        // Ensure no markdown block formatting ruins JSON.parse
-        const cleanedJson = rawJson.replace(/```json/g, '').replace(/```/g, '').trim();
-        parsedData = JSON.parse(cleanedJson);
-      } else {
-        console.warn("VENICE_API_KEY missing, using mock fallback.");
-        parsedData = {
-          recipient: "0xMockAddress (Netflix)",
-          amount: "5.00 USDC",
-          frequency: "Weekly",
-          monthlyCap: "25.00 USDC"
-        };
-      }
-    } catch (error) {
-      console.error("Venice AI Error:", error);
-    }
-
-    const aiResponseText = `I can create a recurring payment:\nRecipient: ${parsedData.recipient}\nAmount: ${parsedData.amount}\nFrequency: ${parsedData.frequency}\n\nApprove this delegation?`
-
-    // 3. Insert Agent response into Neon DB
+    // 3. Persist agent response in Neon DB
     await db.insert(chatMessages).values({
       ownerAddress: data.ownerAddress,
       role: 'agent',
-      content: aiResponseText,
+      content: responseText,
     })
 
-    // 4. Return structured response to the frontend client
-    return { 
-      success: true, 
-      text: aiResponseText,
-      structuredData: parsedData 
+    return {
+      success: true,
+      text: responseText,
+      structuredData,
     }
   })
